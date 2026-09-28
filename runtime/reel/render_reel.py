@@ -212,6 +212,7 @@ Return JSON:
   "hooks": [{{"text": "...", "type": "...", "score": 0}}],
   "hook": {{"text": "...", "type": "..."}},
   "visual_bible": {{"grade": "...", "mood": "..."}},
+  "visual_anchors": ["5-10 lowercase English words, at least one of which any on-topic stock footage label must contain (e.g. saturn, planet, rings, space, galaxy, telescope)"],
   "scenes": [{{"purpose": "hook|context|fact|reveal|payoff", "narration": "...", "claim": "the factual claim in English or empty",
               "sources": ["S1"], "badge": "short fact number or empty", "headline": "1-3 word label or empty",
               "shot_type": "...", "keywords": ["specific English stock query naming the exact subject (e.g. 'Saturn rings Cassini')", "alternative real-footage query", "broader on-topic query"],
@@ -1333,6 +1334,9 @@ def main():
         print("[director] script score:", review.get("score"), review.get("issues"), "rewrote", rewritten)
         visuals.enforce_shot_variety(scenes)
         GRADE["vf"] = visuals.grade_filter(script.get("visual_bible"))
+        ANCHORS.clear()
+        ANCHORS.update(w.lower().strip() for w in (script.get("visual_anchors") or []) if isinstance(w, str) and 2 < len(w) < 20)
+        ANCHORS.update(w.lower() for w in re.findall(r"[A-Za-z]{4,}", cfg["topic"]))
         title = script.get("title") or cfg["prompt"][:60]
         update_row(vid, step=f"Script ready: {len(scenes)} scenes", progress=18, title=title)
         lap("review")
