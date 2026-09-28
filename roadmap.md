@@ -10,6 +10,11 @@
 - [x] Tighten stock cuts, short captions, simple editing, and low music
 - [x] Generate and review one Hindi test reel (Drive upload succeeded; review exposed mismatched/blank stock, now rejected; strict stock matching needs a fresh full render to confirm)
 
+## Done — ElevenLabs reel voices
+- [x] ElevenLabs primary voice with Edge TTS backup in reel engine
+- [x] Default ElevenLabs voices per category (male/female), all languages
+- [x] Hinglish test reel rendered with ElevenLabs and saved to Drive
+
 ## In progress — Video Agent News & Facts reels
 - [x] Verify runtime repo, stock keys, Drive Audio Library folder
 - [ ] Grouped ≤10-key payload + Drive music pick in dispatcher
