@@ -87,7 +87,12 @@ function buildReelPayload(
   durationSeconds: number,
   category: string,
   track: { id: string; name: string } | null,
+  retryScene = -1,
 ): Record<string, unknown> {
+  const d = (v.direction && typeof v.direction === "object" ? v.direction : {}) as Record<
+    string,
+    unknown
+  >;
   const s = (x: unknown, d = "") => (x === null || x === undefined || x === "" ? d : String(x));
   const scale = Number(v.caption_scale ?? 4);
   return {
@@ -107,6 +112,7 @@ function buildReelPayload(
       bitrate_mbps: String(
         Math.min(16, Math.max(1, Number(/(\d+)\s*Mbps/i.exec(s(v.bitrate))?.[1] ?? 16))),
       ),
+      sources: "pexels,pixabay",
     },
     audio: { language: s(v.language, "English"), voice_gender: s(v.voice_gender, "male") },
     music: {
@@ -121,8 +127,15 @@ function buildReelPayload(
     },
     edit: { template: s(v.edit_template, "Dynamic") },
     timing: { duration_seconds: String(durationSeconds) },
-    stock: { sources: "pexels,pixabay" },
-    meta: { version: "reel-2" },
+    direction: {
+      hook_style: s(d.hook_style, "auto"),
+      pacing: s(d.pacing, "dynamic"),
+      music_level: track ? s(d.music_level, "medium") : "off",
+      sfx_level: s(d.sfx_level, "medium"),
+      creativity: s(d.creativity, "balanced"),
+      research_depth: s(d.research_depth, "standard"),
+    },
+    meta: { version: "reel-3", retry_scene: String(retryScene) },
   };
 }
 
@@ -563,7 +576,13 @@ Deno.serve(async (req: Request) => {
         const category = String(v.category || video.voice_persona || "News & Facts");
         const musicOn = video.motion_template !== "bgm_off";
         const track = musicOn ? await pickMusic(category, video.prompt ?? "") : null;
-        clientPayload = buildReelPayload(video as Record<string, unknown>, durSec, category, track);
+        clientPayload = buildReelPayload(
+          video as Record<string, unknown>,
+          durSec,
+          category,
+          track,
+          Number.isInteger(body.retryScene) ? Number(body.retryScene) : -1,
+        );
       }
 
       const ghRes = await fetch(GITHUB_DISPATCH_URL, {
