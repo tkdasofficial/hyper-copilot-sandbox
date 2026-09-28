@@ -9,7 +9,7 @@ sub-properties) and builds a real video:
   (zoom, pan/keyframes, speed, vignette/mask, overlays, captions) -> Google
   Drive "Videos" folder. Progress is written to the Supabase `videos` row.
 """
-import asyncio, json, math, os, random, re, shutil, subprocess, sys, time, zipfile
+import asyncio, base64, json, math, os, random, re, shutil, subprocess, sys, time, zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -137,7 +137,7 @@ def dims(cfg):
 
 
 # ---------------------------------------------------------------- script
-NIM_MODELS = ["nvidia/nemotron-3-ultra-550b-a55b"]
+NIM_MODELS = ["nvidia/nemotron-3-ultra-550b-a55b", "meta/llama-3.3-70b-instruct"]  # fallback keeps reels alive during an outage
 
 
 LANG_RULES = {
@@ -442,6 +442,8 @@ def el_settings(cfg, rate: str):
 
 
 EL_DISABLED = {"off": False}
+import threading as _th
+EL_SLOTS = _th.BoundedSemaphore(int(os.environ.get("ELEVENLABS_CONCURRENCY", "2") or 2))  # plan limit: 2 concurrent
 
 
 def el_tts(text, cfg, out: Path, rate: str, ctx=None):
@@ -460,8 +462,13 @@ def el_tts(text, cfg, out: Path, rate: str, ctx=None):
         body["language_code"] = EL_LANG[lang]
     if model == "eleven_v3":
         body["voice_settings"] = {"stability": 0.5, "similarity_boost": 0.75, "use_speaker_boost": True}
-    r = requests.post(f"https://api.elevenlabs.io/v1/text-to-speech/{el_voice(cfg)}/with-timestamps?output_format=mp3_44100_128",
-                      headers={"xi-api-key": key, "Content-Type": "application/json"}, json=body, timeout=120)
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{el_voice(cfg)}/with-timestamps?output_format=mp3_44100_128"
+    for wait in (0, 3, 6, 12, 20):  # 429 concurrent/rate limit: wait for a free slot instead of dropping to Edge
+        time.sleep(wait)
+        with EL_SLOTS:
+            r = requests.post(url, headers={"xi-api-key": key, "Content-Type": "application/json"}, json=body, timeout=120)
+        if r.status_code != 429:
+            break
     if r.status_code in (401, 402, 403):
         EL_DISABLED["off"] = True  # key/quota problem: stop calling for this render
     if not r.ok:
@@ -727,6 +734,35 @@ _VSCORE: dict = {}
 ANCHORS: set = set()
 
 
+def ai_still(prompt, cfg, idx, _grade=None):
+    """Cloudflare Workers AI (FLUX schnell) still for scenes stock libraries cannot cover (e.g. Saturn's hexagon).
+    Returns an image asset (animated later with the usual Ken-Burns move) or None."""
+    acc, tok = os.environ.get("CLOUDFLARE_ACCOUNT_ID", ""), os.environ.get("CLOUDFLARE_API_TOKEN", "")
+    if not acc or not tok:
+        return None
+    # numbers/claims in the prompt make FLUX paint garbled captions ("0.69 g/cum3") - describe the subject only
+    prompt = re.sub(r"[\d.,%/°]+\s*\w{0,4}", " ", re.sub(r"\([^)]*\)", " ", prompt))
+    prompt = re.sub(r"\s+", " ", prompt).strip()[:300]
+    full = (f"{prompt}. Photorealistic cinematic documentary frame, {cfg.get('style', 'cinematic')} style, "
+            "accurate science visualization, vertical composition, absolutely no text, no letters, no numbers, no labels, "
+            "no diagram annotations, no watermark, no people unless mentioned")
+    for attempt in range(2):
+        try:
+            r = requests.post(f"https://api.cloudflare.com/client/v4/accounts/{acc}/ai/run/@cf/black-forest-labs/flux-1-schnell",
+                              headers={"Authorization": f"Bearer {tok}"}, json={"prompt": full[:2000], "steps": 8}, timeout=90)
+            r.raise_for_status()
+            img = base64.b64decode(r.json()["result"]["image"])
+            dest = WORK / f"asset_{idx}_ai.jpg"
+            dest.write_bytes(img)
+            if len(img) > 20_000 and not unusable_asset(dest, "image"):
+                print(f"[visual] AI still for '{prompt[:70]}'")
+                return {"path": dest, "kind": "image", "src": "ai", "id": f"ai{idx}", "url": "", "query": prompt[:120],
+                        "score": None, "label": 1.0, "sim": 0.0, "hash": visuals.dhash(dest, "image"), "weak": False}
+        except Exception as e:
+            print(f"[visual] AI still failed (attempt {attempt + 1}):", str(e)[:150])
+    return None
+
+
 def select_asset(queries, cfg, idx, subject, claim, used_hashes, shot="", min_score=0.6, exclude=()):
     """Semantic stock selection: search -> label pre-filter -> vision score + repetition check on previews
     (parallel, before any download) -> download the best -> quality probe. Returns asset dict or None.
@@ -768,6 +804,7 @@ def select_asset(queries, cfg, idx, subject, claim, used_hashes, shot="", min_sc
                                   c["kind"] == "video"), reverse=True)
         fresh = fresh[:8]
         if not fresh:
+            print(f"[visual] no search results passed the label filter for {batch}")
             continue
 
         def judge(c):
@@ -776,7 +813,7 @@ def select_asset(queries, cfg, idx, subject, claim, used_hashes, shot="", min_sc
                 _VSCORE[c["id"]] = director.vision_score(b64, subject, claim) if b64 else None
             return c, _VSCORE[c["id"]], h
 
-        with ThreadPoolExecutor(max_workers=8) as ex:
+        with ThreadPoolExecutor(max_workers=4) as ex:
             for c, v, h in ex.map(judge, fresh):
                 sim = max([visuals.similarity(h, u) for u in used_hashes] or [0.0])
                 base = v if v is not None else c["label_rel"] * 0.8
@@ -789,9 +826,9 @@ def select_asset(queries, cfg, idx, subject, claim, used_hashes, shot="", min_sc
                 # reel's subject world (e.g. saturn/planet/space), otherwise "year" matches a party photo.
                 c["ok"] = sim < 0.88 and ((v >= min_score) if v is not None else (c["label_rel"] >= 0.5 and anchored))
                 if v is None and not anchored:
-                    continue  # unverifiable and not about the subject: never usable, not even as a weak fallback
+                    c["final"] = round(c["final"] * 0.3, 3)  # unverifiable + off-subject label: last-resort only
                 if v is not None and v < 0.3:
-                    continue  # vision says unrelated
+                    c["final"] = round(c["final"] - 1.0, 3)  # vision says unrelated: behind every other option
                 scored.append(c)
         if any(c["ok"] for c in scored):
             break
@@ -1138,6 +1175,9 @@ class Planner:
         segs_n = max(1, math.ceil(sc["dur"] / self.cut_len)) if self.t.get("fact_style") else 1
         cuts = [round(nframes * k / segs_n) for k in range(segs_n + 1)]
         used = self.used_hashes(skip=i)
+        # never reuse a clip/photo already placed in another scene (hashes of photo vs. thumbnail can differ)
+        exclude = tuple(exclude) + tuple(sg["asset"]["id"] for k, p in self.plans.items() if k != i
+                                         for sg in p.get("segments", []) if sg.get("asset"))
         segments = []
         for j in range(segs_n):
             ordered = queries[j % len(queries):] + queries[:j % len(queries)]
@@ -1156,9 +1196,18 @@ class Planner:
                 broad = [f"{self.cfg['topic']} {a}" for a in sorted(ANCHORS)[:3]] + [self.cfg["topic"]]
                 asset = select_asset(broad, self.cfg, self._nidx(), self.cfg["topic"], claim, used, min_score=0.45,
                                      exclude=exclude)
+                if asset is None:  # stock has nothing on-subject left: generate an exact still for this line
+                    asset = ai_still(f"{subject}. {claim}".strip(), self.cfg, self._nidx(), GRADE.get("vf"))
                 if asset is None:
                     raise RuntimeError(f"no usable footage for scene {i + 1} ('{subject}')")
-                asset["weak"] = True
+                asset.setdefault("weak", asset.get("src") != "ai")
+            if asset is not None and asset.get("weak") and (asset.get("score") is None or asset["score"] < 0.4):
+                # Stock only had an unrelated shot (vision: "wind turbine" for Saturn's winds). An exact generated
+                # still of the subject beats a misleading clip; keep the stock clip only if generation fails.
+                gen = ai_still(f"{subject}. {claim}".strip(), self.cfg, self._nidx())
+                if gen is not None:
+                    USED.discard(asset["id"])
+                    asset = gen
             if j == 0 and asset.get("weak") and sc.get("infographic") and self.info_ok(i):
                 USED.discard(asset["id"])
                 return self._info_plan(i, sc, sc["infographic"], subject, claim, nframes)
@@ -1440,6 +1489,24 @@ def main():
         update_row(vid, step="Quality check", progress=90)
         sims = [s["asset"].get("sim") or 0.0 for i in sorted(planner.plans) for s in planner.plans[i].get("segments", [])]
         report = qa.check(final, cfg, W, H, fps, total, sims, verification)
+        repaired = []
+        for _pass in range(2):  # self-repair: re-shoot only the scenes QA flagged, then re-check (never waive the check)
+            bad_t = [float(x) for iss in report["issues"] if iss.startswith("black frames")
+                     for x in re.findall(r"[\d.]+", iss.split(" at ", 1)[1])]
+            bad = sorted({k for tt in bad_t for k, sc in enumerate(timeline) if sc["start"] - 0.05 <= tt < sc["end"]})
+            if not bad or [x for x in report["issues"] if not x.startswith("black frames")]:
+                break
+            for k in bad:
+                old_ids = tuple(sg["asset"]["id"] for sg in planner.plans[k].get("segments", []) if sg.get("asset"))
+                print(f"[qa-repair] scene {k + 1} has black frames; replacing {old_ids}")
+                planner.plan(k, timeline[k], {"queries": timeline[k]["keywords"]}, exclude=old_ids)
+                rendered[k] = planner.render(k)
+                repaired.append(k + 1)
+            _concat([c for i in range(len(timeline)) for c in rendered[i]], video)
+            _encode_final(cfg, fps, video, mixed, ass, final)
+            sims = [s["asset"].get("sim") or 0.0 for i in sorted(planner.plans) for s in planner.plans[i].get("segments", [])]
+            report = qa.check(final, cfg, W, H, fps, total, sims, verification)
+        report["repaired_scenes"] = repaired
         post = hard_checks(timeline, planner, fps)
         report["warnings"] = list(dict.fromkeys(report["warnings"] + post))
         report["director"] = {"hook": script.get("hook"), "script_score": review.get("score"),

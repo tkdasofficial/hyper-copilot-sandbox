@@ -10,7 +10,7 @@ from urllib.parse import quote
 import requests
 
 NIM_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-TEXT_MODELS = ["nvidia/nemotron-3-ultra-550b-a55b"]
+TEXT_MODELS = ["nvidia/nemotron-3-ultra-550b-a55b", "meta/llama-3.3-70b-instruct"]
 UA = {"User-Agent": "HyperCopilotReel/3.0 (research bot; contact via github.com/tkdasofficial)"}
 AUTHORITY = ("nasa.gov", "esa.int", "noaa.gov", "nih.gov", "who.int", ".gov", ".edu", ".ac.", "isro.gov.in",
              "britannica.com", "nationalgeographic.com", "nature.com", "science.org", "si.edu", "wikipedia.org")
@@ -138,7 +138,7 @@ def vision_score(image_b64: str, subject: str, claim: str = ""):
             return None
         try:
             VISION_STATE["calls"] += 1
-            v = _vision_call(VISION_STATE["model"], image_b64, prompt, 20)
+            v = _vision_call(VISION_STATE["model"], image_b64, prompt, 35)
             VISION_STATE["fails"] = 0
             return v
         except Exception as e:
