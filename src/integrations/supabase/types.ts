@@ -335,6 +335,7 @@ export type Database = {
           category: string
           created_at: string
           direct_download_url: string | null
+          direction: Json | null
           duration_seconds: number
           edit_template: string
           error: string | null
@@ -347,7 +348,10 @@ export type Database = {
           negative_prompt: string
           progress: number
           prompt: string
+          qa_report: Json | null
           quality: string
+          scenes: Json | null
+          sources: Json | null
           status: string
           step: string | null
           title: string | null
@@ -369,6 +373,7 @@ export type Database = {
           category?: string
           created_at?: string
           direct_download_url?: string | null
+          direction?: Json | null
           duration_seconds?: number
           edit_template?: string
           error?: string | null
@@ -381,7 +386,10 @@ export type Database = {
           negative_prompt?: string
           progress?: number
           prompt?: string
+          qa_report?: Json | null
           quality?: string
+          scenes?: Json | null
+          sources?: Json | null
           status?: string
           step?: string | null
           title?: string | null
@@ -403,6 +411,7 @@ export type Database = {
           category?: string
           created_at?: string
           direct_download_url?: string | null
+          direction?: Json | null
           duration_seconds?: number
           edit_template?: string
           error?: string | null
@@ -415,7 +424,10 @@ export type Database = {
           negative_prompt?: string
           progress?: number
           prompt?: string
+          qa_report?: Json | null
           quality?: string
+          scenes?: Json | null
+          sources?: Json | null
           status?: string
           step?: string | null
           title?: string | null
