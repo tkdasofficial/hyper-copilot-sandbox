@@ -15,7 +15,12 @@ import { StudioLayout } from "@/layouts/StudioLayout";
 import { RecentCreations } from "@/components/Studio/RecentCreations";
 import { useServerFn } from "@tanstack/react-start";
 import { supabase } from "@/config";
-import { getMusicLibrary, getVideoPlaybackUrl, startVideoRender } from "@/services/videoAgent";
+import {
+  getMusicLibrary,
+  getVideoPlaybackUrl,
+  retryReelScene,
+  startVideoRender,
+} from "@/services/videoAgent";
 import { cn } from "@/lib/utils";
 import { Panel, Segment, SliderRow, SwitchRow, TextRow } from "@/components/Studio/StudioControls";
 import { Button } from "@/components/ui/button";
@@ -49,6 +54,21 @@ const EDIT_TEMPLATES = ["Dynamic", "Documentary", "Minimal", "Fast Cuts"] as con
 const CAPTION_STYLES = ["Minimal", "Bold", "Dynamic"] as const;
 const CAPTION_SIZES = ["Small", "Medium", "Large"] as const;
 const MODES = ["Long-form", "Short-form"] as const;
+const HOOK_STYLES = ["Auto", "Shocking fact", "Curiosity question", "Unexpected comparison", "Mystery", "Surprising number"] as const;
+const PACINGS = ["Dynamic", "Fast", "Relaxed"] as const;
+const LEVELS = ["Off", "Low", "Medium", "High"] as const;
+const CREATIVITY = ["Safe", "Balanced", "Bold"] as const;
+const RESEARCH = ["Off", "Light", "Standard", "Deep"] as const;
+
+type QaReport = {
+  passed?: boolean;
+  issues?: string[];
+  warnings?: string[];
+  facts?: { verified: number; single_source: number; unverified: number };
+  hook?: { type?: string; text?: string };
+};
+type Source = { id: string; url: string; title: string; authority?: boolean };
+type SceneRow = { i: number; narration?: string; purpose?: string };
 const STAGES = [
   { stage: 1, label: "Scripting" },
   { stage: 2, label: "Voiceover" },
@@ -115,6 +135,16 @@ export function VideoAgentPage() {
   const [captionStyle, setCaptionStyle] = useState<(typeof CAPTION_STYLES)[number]>("Dynamic");
   const [captionSize, setCaptionSize] = useState<(typeof CAPTION_SIZES)[number]>("Medium");
 
+  const [hookStyle, setHookStyle] = useState<(typeof HOOK_STYLES)[number]>("Auto");
+  const [pacing, setPacing] = useState<(typeof PACINGS)[number]>("Dynamic");
+  const [musicLevel, setMusicLevel] = useState<(typeof LEVELS)[number]>("Medium");
+  const [sfxLevel, setSfxLevel] = useState<(typeof LEVELS)[number]>("Medium");
+  const [creativity, setCreativity] = useState<(typeof CREATIVITY)[number]>("Balanced");
+  const [research, setResearch] = useState<(typeof RESEARCH)[number]>("Standard");
+  const [doneId, setDoneId] = useState<string | null>(null);
+  const [qa, setQa] = useState<QaReport | null>(null);
+  const [sources, setSources] = useState<Source[]>([]);
+  const [sceneRows, setSceneRows] = useState<SceneRow[]>([]);
   const [busy, setBusy] = useState(false);
   const [videoId, setVideoId] = useState<string | null>(null);
   const [status, setStatus] = useState<"pending" | "processing" | "completed" | "failed" | null>(
@@ -132,6 +162,37 @@ export function VideoAgentPage() {
   const start = useServerFn(startVideoRender);
   const resolvePlaybackUrl = useServerFn(getVideoPlaybackUrl);
   const loadMusic = useServerFn(getMusicLibrary);
+  const retryScene = useServerFn(retryReelScene);
+
+  const loadReport = useCallback(async (id: string) => {
+    const { data } = await supabase
+      .from("videos")
+      .select("qa_report, sources, scenes")
+      .eq("id", id)
+      .maybeSingle();
+    const row = (data ?? {}) as Record<string, unknown>;
+    setQa((row["qa_report"] as QaReport) ?? null);
+    setSources(Array.isArray(row["sources"]) ? (row["sources"] as Source[]) : []);
+    const doc = row["scenes"] as { timeline?: SceneRow[] } | null;
+    setSceneRows(Array.isArray(doc?.timeline) ? doc.timeline : []);
+  }, []);
+
+  const handleRetryScene = async (scene: number) => {
+    if (!doneId) return;
+    try {
+      await retryScene({ data: { videoId: doneId, scene } });
+      setQa(null);
+      setClipUrl(null);
+      setBusy(true);
+      setStatus("processing");
+      setStep(`Redoing scene ${scene + 1}`);
+      setProgress(5);
+      setVideoId(doneId);
+      toast.success(`Redoing scene ${scene + 1}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not redo that scene");
+    }
+  };
 
   useEffect(() => {
     let alive = true;
@@ -151,6 +212,9 @@ export function VideoAgentPage() {
   const getActiveStage = (): number => {
     if (status === "completed" || progress === 100) return 4;
     const s = step.toLowerCase();
+    if (s.includes("research") || s.includes("storyboard") || s.includes("story")) return 1;
+    if (s.includes("review") || s.includes("quality") || s.includes("shot") || s.includes("mixing"))
+      return 3;
     if (s.includes("script") || s.includes("queued") || s.includes("prompt")) return 1;
     if (s.includes("voice") || s.includes("tts") || s.includes("speech") || s.includes("audio"))
       return 2;
@@ -248,6 +312,8 @@ export function VideoAgentPage() {
           }
         }
 
+        void loadReport(activeId);
+        setDoneId(activeId);
         log("Video ready", "ok");
         setBusy(false);
         setVideoId(null);
@@ -257,6 +323,8 @@ export function VideoAgentPage() {
         const msg =
           typeof row["error"] === "string" && row["error"] ? row["error"] : "Generation failed";
         log(msg, "err");
+        void loadReport(activeId);
+        setDoneId(activeId);
         setBusy(false);
         setVideoId(null);
         toast.error(msg);
@@ -285,7 +353,7 @@ export function VideoAgentPage() {
       window.clearInterval(poll);
       void supabase.removeChannel(channel);
     };
-  }, [videoId, log, queryClient, resolvePlaybackUrl]);
+  }, [videoId, log, queryClient, resolvePlaybackUrl, loadReport]);
 
   const handleGenerateVideo = async () => {
     if (!prompt.trim()) {
@@ -296,6 +364,10 @@ export function VideoAgentPage() {
     setBusy(true);
     setClipUrl(null);
     setDriveUrl(null);
+    setQa(null);
+    setSources([]);
+    setSceneRows([]);
+    setDoneId(null);
     setStatus("pending");
     setStep("Scripting");
     setProgress(5);
@@ -329,6 +401,14 @@ export function VideoAgentPage() {
           language,
           visual_type: visualType,
           edit_template: editTemplate,
+          direction: {
+            hook_style: hookStyle.toLowerCase(),
+            pacing: pacing.toLowerCase(),
+            music_level: bgm ? musicLevel.toLowerCase() : "off",
+            sfx_level: sfxLevel.toLowerCase(),
+            creativity: creativity.toLowerCase(),
+            research_depth: research.toLowerCase(),
+          },
         },
       });
 
@@ -495,6 +575,22 @@ export function VideoAgentPage() {
           ) : null}
         </Panel>
 
+        {mode === "short" ? (
+          <Panel
+            title="Advanced direction"
+            summary={`${hookStyle} hook · ${pacing} · research ${research.toLowerCase()}`}
+          >
+            <Segment label="Hook style" options={HOOK_STYLES} value={hookStyle} onChange={setHookStyle} />
+            <Segment label="Pacing" options={PACINGS} value={pacing} onChange={setPacing} />
+            {bgm ? (
+              <Segment label="Music intensity" options={LEVELS} value={musicLevel} onChange={setMusicLevel} />
+            ) : null}
+            <Segment label="Sound effects" options={LEVELS} value={sfxLevel} onChange={setSfxLevel} />
+            <Segment label="Creativity" options={CREATIVITY} value={creativity} onChange={setCreativity} />
+            <Segment label="Research depth" options={RESEARCH} value={research} onChange={setResearch} />
+          </Panel>
+        ) : null}
+
         <Button
           type="button"
           id="generate-video-action-btn"
@@ -614,6 +710,74 @@ export function VideoAgentPage() {
                 </a>
               ) : null}
             </div>
+          </div>
+        ) : null}
+
+        {qa && !busy ? (
+          <div className="space-y-3 rounded-2xl border border-border bg-surface/50 p-3.5 text-[12.5px]">
+            <div className="flex items-center justify-between">
+              <p className="text-[13px] font-bold tracking-tight">Quality check</p>
+              <span
+                className={cn(
+                  "rounded-full px-2.5 py-0.5 text-[11px] font-bold uppercase",
+                  qa.passed ? "bg-emerald-500/15 text-emerald-400" : "bg-destructive/15 text-destructive",
+                )}
+              >
+                {qa.passed ? "Passed" : "Needs work"}
+              </span>
+            </div>
+            {qa.hook?.text ? (
+              <p className="text-muted-foreground">
+                Hook ({qa.hook.type}): <span className="text-foreground">{qa.hook.text}</span>
+              </p>
+            ) : null}
+            {qa.facts ? (
+              <p className="text-muted-foreground">
+                Facts: {qa.facts.verified} verified · {qa.facts.single_source} single source ·{" "}
+                {qa.facts.unverified} unverified
+              </p>
+            ) : null}
+            {[...(qa.issues ?? []), ...(qa.warnings ?? [])].map((w) => (
+              <p key={w} className="text-amber-400/90">
+                • {w}
+              </p>
+            ))}
+            {sceneRows.length > 0 ? (
+              <div className="space-y-1.5">
+                <p className="font-semibold">Scenes</p>
+                {sceneRows.map((sc) => (
+                  <div key={sc.i} className="flex items-center gap-2">
+                    <span className="w-5 shrink-0 text-muted-foreground tabular-nums">{sc.i + 1}</span>
+                    <span className="min-w-0 flex-1 truncate">{sc.narration}</span>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-7 rounded-full px-2.5 text-[11px]"
+                      onClick={() => void handleRetryScene(sc.i)}
+                    >
+                      Redo shot
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {sources.length > 0 ? (
+              <div className="space-y-1">
+                <p className="font-semibold">Sources</p>
+                {sources.map((src) => (
+                  <a
+                    key={src.id}
+                    href={src.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block truncate text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                  >
+                    [{src.id}] {src.title}
+                  </a>
+                ))}
+              </div>
+            ) : null}
           </div>
         ) : null}
 

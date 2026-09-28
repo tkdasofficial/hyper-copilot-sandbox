@@ -30,7 +30,27 @@ export type VideoAgentConfig = {
   language?: string;
   visual_type?: string;
   edit_template?: string;
+  direction?: Record<string, string>;
 };
+
+const DIRECTION_OPTIONS: Record<string, string[]> = {
+  hook_style: ["auto", "shocking fact", "curiosity question", "unexpected comparison", "mystery", "surprising number"],
+  pacing: ["dynamic", "fast", "relaxed"],
+  music_level: ["off", "low", "medium", "high"],
+  sfx_level: ["off", "low", "medium", "high"],
+  creativity: ["safe", "balanced", "bold"],
+  research_depth: ["off", "light", "standard", "deep"],
+};
+
+function cleanDirection(d: unknown): Record<string, string> | undefined {
+  if (!d || typeof d !== "object") return undefined;
+  const out: Record<string, string> = {};
+  for (const [k, opts] of Object.entries(DIRECTION_OPTIONS)) {
+    const v = String((d as Record<string, unknown>)[k] ?? "").toLowerCase();
+    if (opts.includes(v)) out[k] = v;
+  }
+  return out;
+}
 
 function validate(input: VideoAgentConfig): VideoAgentConfig {
   if (!input || typeof input.prompt !== "string" || !input.prompt.trim()) {
@@ -93,6 +113,7 @@ function validate(input: VideoAgentConfig): VideoAgentConfig {
     )
       ? String(input.edit_template)
       : "Dynamic",
+    direction: cleanDirection(input.direction),
   };
 }
 
@@ -179,4 +200,28 @@ export const getMusicLibrary = createServerFn({ method: "POST" })
     });
     if (!data?.ok) return { ok: false as const, count: 0, error: data?.error ?? "Music library unavailable" };
     return { ok: true as const, count: data.count ?? 0, error: null };
+  });
+
+/** Redo one scene of a reel; the rest of the video reuses its saved shots. */
+export const retryReelScene = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { videoId: string; scene: number }) => {
+    if (!input?.videoId || !Number.isInteger(input.scene) || input.scene < 0 || input.scene > 30)
+      throw new Error("A video and scene number are required");
+    return { videoId: String(input.videoId), scene: input.scene };
+  })
+  .handler(async ({ data, context }) => {
+    const { data: row } = await context.supabase
+      .from("videos")
+      .select("id, status")
+      .eq("id", data.videoId)
+      .eq("user_id", context.userId)
+      .maybeSingle();
+    if (!row) throw new Error("Video not found");
+    if (row.status === "processing" || row.status === "pending")
+      throw new Error("This video is still rendering");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { retryVideoScene } = await import("@/lib/video-agent.server");
+    await retryVideoScene(supabaseAdmin, data.videoId, data.scene);
+    return { ok: true };
   });
