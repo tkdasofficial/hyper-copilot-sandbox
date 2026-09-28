@@ -50,9 +50,17 @@ VISION_MODELS = ["meta/llama-4-maverick-17b-128e-instruct", "meta/llama-3.2-90b-
 _CF_AGREED = set()
 
 
+_WORDS = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+
+
 def _parse_score(text):
     m = re.search(r"\"?score\"?\s*[:=]\s*(\d+(?:\.\d+)?)", text) or re.search(r"\b(\d+(?:\.\d+)?)\s*/\s*10", text)
     if not m:
+        m = re.search(r"\b(?:score|rate|rating)\D{0,12}(\d+(?:\.\d+)?)\b", text, re.I)
+    if not m:
+        w = re.search(r"\b(" + "|".join(_WORDS) + r")\s*(?:out of|/)\s*(?:10|ten)\b", text, re.I)
+        if w:
+            return _WORDS[w.group(1).lower()] / 10
         raise ValueError("no score in reply: " + text[:80])
     return max(0.0, min(1.0, float(m.group(1)) / 10))
 
@@ -69,13 +77,14 @@ def _cf_vision(model, image_b64, prompt, timeout):
         _CF_AGREED.add(model)
     import base64 as _b
     body = ({"image": list(_b.b64decode(image_b64)), "prompt": prompt, "max_tokens": 120} if "llava" in model else
-            {"messages": [{"role": "user", "content": prompt}], "image": list(_b.b64decode(image_b64)), "max_tokens": 120})
+            {"prompt": prompt, "image": list(_b.b64decode(image_b64)), "max_tokens": 120})
     r = requests.post(url, headers=h, json=body, timeout=timeout)
     if r.status_code in (400, 401, 403, 404, 422):
         raise LookupError(f"{r.status_code} {r.text[:120]}")
     r.raise_for_status()
     res = r.json().get("result") or {}
-    return _parse_score(res.get("response") or res.get("description") or "")
+    out = res.get("response") or res.get("description") or ""
+    return _parse_score(out if isinstance(out, str) else json.dumps(out))
 
 
 def _vision_call(model, image_b64, prompt, timeout):
@@ -101,7 +110,10 @@ def vision_ready(sample_b64: str) -> bool:
     for model in [m for m in VISION_MODELS if m not in VISION_STATE["dead"]]:
         t0 = time.time()
         try:
-            _vision_call(model, sample_b64, 'Is this an image? Reply JSON {"score": 10}', 30)
+            try:
+                _vision_call(model, sample_b64, 'Rate 0-10 how sharp this image is. Reply JSON only: {"score": n}', 30)
+            except ValueError:
+                pass  # the model answered (just not in JSON): it is reachable and can see the image
             VISION_STATE["model"] = model
             print(f"[vision] using {model} ({time.time() - t0:.1f}s probe)")
             return True
@@ -120,8 +132,10 @@ def vision_score(image_b64: str, subject: str, claim: str = ""):
     prompt = (f"A short documentary scene is about: {subject}.\n" + (f"The narrator says (English gist): {claim}\n" if claim else "") +
               "Score how well THIS image shows that exact subject, 0-10. 9-10: clearly the exact subject. 6-8: the subject, "
               "loosely framed. 3-5: generic/related mood only. 0-2: unrelated or contradicting (wrong planet, wrong object, "
-              "people/office when the topic is astronomy, text-heavy thumbnails). Reply JSON only: {\"score\": n, \"why\": \"...\"}")
+              "people/office when the topic is astronomy, text-heavy thumbnails). Reply with JSON only, no other words: {\"score\": n}")
     for attempt in range(2):
+        if not VISION_STATE["model"] and not vision_ready(image_b64):
+            return None
         try:
             VISION_STATE["calls"] += 1
             v = _vision_call(VISION_STATE["model"], image_b64, prompt, 20)
@@ -227,16 +241,19 @@ def research(cfg) -> list:
     web = _web(f"{topic} facts", n_web + 2)
     sources = []
     if wiki:
-        main = _tf(wiki[0]["text"])
+        # Compare content WITHOUT the shared topic word, otherwise "Saturn V" and "Sega Saturn" look on-topic.
+        tw = {w.lower() for w in re.findall(r"\w+", topic)}
+        _strip = lambda d: {k: v for k, v in d.items() if k not in tw}
+        main = _strip(_tf(wiki[0]["text"]))
         sources.append(wiki[0])
         for s in wiki[1:]:
-            c = _cos(main, _tf(s["text"]))
+            c = _cos(main, _strip(_tf(s["text"])))
             if c >= 0.35 and len(sources) < n_wiki:
                 sources.append(s)
             else:
                 print(f"[research] dropped off-topic source '{s['title']}' (similarity {c:.2f})")
         for s in web:
-            c = _cos(main, _tf(s["text"]))
+            c = _cos(main, _strip(_tf(s["text"])))
             if c >= 0.2 and len(sources) < n_wiki + n_web:
                 sources.append(s)
             else:
