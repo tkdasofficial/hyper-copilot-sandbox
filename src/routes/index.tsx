@@ -1,24 +1,46 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { pageHead } from "@/lib/seo";
+import { HomePage } from "@/pages/Home";
 
-// No head() here: the home route inherits title/description/og/twitter from
-// __root.tsx, and ships no og:image so serve-time hosting can inject the
-// project's social preview (explicit og:image or latest screenshot).
 export const Route = createFileRoute("/")({
-  component: Index,
+  head: () =>
+    pageHead({
+      path: "/",
+      title: "Hyper Copilot — Multi-Modal AI Generator",
+      description:
+        "Built by Tushar Kanti Das, Hyper Copilot is an all-in-one multi-modal AI platform for image, video, audio, and AI influencer creation.",
+      keywords: [
+        "AI image generator",
+        "AI video generator",
+        "AI music generator",
+        "AI influencer creator",
+        "photoreal image AI",
+        "text to speech AI",
+        "AI art generator online",
+        "all in one AI studio",
+        "generative AI for teams",
+        "AI vector generator",
+        "8K AI upscaler",
+        "commercially safe AI images",
+      ],
+      jsonLd: [
+        {
+          "@type": "SoftwareApplication",
+          name: "Hyper Copilot",
+          applicationCategory: "MultimediaApplication",
+          operatingSystem: "All",
+          url: "https://hypercopilot.vercel.app/",
+          offers: {
+            "@type": "Offer",
+            price: "0",
+            priceCurrency: "USD",
+          },
+          creator: {
+            "@type": "Person",
+            name: "Tushar Kanti Das",
+          },
+        },
+      ],
+    }),
+  component: HomePage,
 });
-
-// IMPORTANT: Replace this placeholder. See ./README.md for routing conventions.
-function Index() {
-  return (
-    <div
-      className="flex min-h-screen items-center justify-center"
-      style={{ backgroundColor: "#fcfbf8" }}
-    >
-      <img
-        data-lovable-blank-page-placeholder="REMOVE_THIS"
-        src="https://cdn.gpteng.co/blank-app-v1.svg"
-        alt="Your app will live here!"
-      />
-    </div>
-  );
-}
