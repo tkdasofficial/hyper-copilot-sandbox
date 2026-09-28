@@ -45,6 +45,7 @@ export type VideoRenderConfig = {
   language?: string;
   visual_type?: string;
   edit_template?: string;
+  direction?: Record<string, string>;
 };
 
 type Client = SupabaseClient<Database>;
@@ -296,6 +297,7 @@ export async function createVideoRequest(
     language: data.language ?? "English",
     visual_type: data.visual_type ?? "Stock footage",
     edit_template: data.edit_template ?? "Dynamic",
+    ...(data.direction ? { direction: data.direction } : {}),
     status: "pending" as const,
     step: RENDER_STEP_QUEUED,
     progress: 0,
@@ -428,4 +430,20 @@ export async function dispatchPendingRenders(
     outcomes.push({ id: row.id, outcome: await dispatchVideoRender(admin, row.id) });
   }
   return outcomes;
+}
+
+/** Re-renders a finished/failed reel, regenerating only one scene's visuals (other shots reuse stored clips). */
+export async function retryVideoScene(admin: Client, videoId: string, scene: number) {
+  const { data: runner } = await admin.from("job_runner").select("worker_token").eq("id", "default").maybeSingle();
+  const workerSecret = (runner?.worker_token ?? "").trim();
+  if (!workerSecret) throw new Error("The backend worker credential is not configured yet.");
+  await admin
+    .from("videos")
+    .update({ status: "processing", step: `Redoing scene ${scene + 1}`, progress: 5, error: null })
+    .eq("id", videoId);
+  const res = await admin.functions.invoke<{ ok?: boolean; error?: string }>("video-dispatcher", {
+    body: { action: "dispatch", videoId, retryScene: scene },
+    headers: { "x-worker-secret": workerSecret },
+  });
+  if (!res.data?.ok) throw new Error(res.data?.error ?? "Could not start the scene retry");
 }
