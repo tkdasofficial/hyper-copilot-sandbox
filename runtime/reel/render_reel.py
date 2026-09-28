@@ -723,6 +723,9 @@ def _thumb(c):
 _VSCORE: dict = {}
 
 
+ANCHORS: set = set()
+
+
 def select_asset(queries, cfg, idx, subject, claim, used_hashes, shot="", min_score=0.6, exclude=()):
     """Semantic stock selection: search -> label pre-filter -> vision score + repetition check on previews
     (parallel, before any download) -> download the best -> quality probe. Returns asset dict or None.
@@ -768,7 +771,12 @@ def select_asset(queries, cfg, idx, subject, claim, used_hashes, shot="", min_sc
                 base = v if v is not None else c["label_rel"] * 0.8
                 c.update(vision=v, sim=round(sim, 2), thumb_hash=h,
                          final=round(base - max(0.0, sim - 0.7) * 2 + (0.03 if c["kind"] == "video" else 0), 3))
-                c["ok"] = sim < 0.88 and ((v >= min_score) if v is not None else c["label_rel"] >= 0.5)
+                anchored = not ANCHORS or any(a in c["label"] for a in ANCHORS)
+                # Without a vision verdict a label match alone is not enough: the stock label must name the
+                # reel's subject world (e.g. saturn/planet/space), otherwise "year" matches a party photo.
+                c["ok"] = sim < 0.88 and ((v >= min_score) if v is not None else (c["label_rel"] >= 0.5 and anchored))
+                if v is None and not anchored:
+                    base *= 0.3
                 scored.append(c)
         if any(c["ok"] for c in scored):
             break
