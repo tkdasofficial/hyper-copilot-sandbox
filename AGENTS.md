@@ -18,3 +18,4 @@ Builder Chat's autonomous conversation and Raw Actions are local mock-only state
 Copilot intent classification lives in the authenticated app server and returns only implemented action states; this keeps client display state aligned with actual backend work.
 - All OAuth (Supabase sign-in, Google/Meta/GitHub linking) returns to /auth/callback; the state prefix picks the flow — one redirect URL to register per service.
 - Build Tools pages live in src/tools/{git,code,files,cloud,skills} with provider folders; Files and Code share one project-files store; only GitHub is live (real linked accounts), GitLab/Bitbucket/Cloud/Skills stay placeholders — never fake connected states.
+- Reel engine source of truth lives in runtime/reel/ and is published to the private TKDasOfficial/hyper-copilot-runtime repo (reel/) via GitHub API with GITHUB_PAT; why: /tmp work is lost between sessions.
