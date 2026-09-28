@@ -1,0 +1,196 @@
+/** Shared (browser-safe) metadata for the Meta social integrations. */
+
+import { ART_STYLES, IMAGE_STYLES } from "@/lib/style-presets";
+export { ART_STYLES, IMAGE_STYLES } from "@/lib/style-presets";
+
+export type SocialProvider = "facebook_page" | "instagram" | "threads" | "youtube";
+
+export type ProviderInfo = {
+  id: SocialProvider;
+  label: string;
+  description: string;
+  scopes: string[];
+  /** Host that shows the consent screen. */
+  authorizeUrl: string;
+};
+
+export const GRAPH_VERSION = "v21.0";
+
+export const PROVIDERS: ProviderInfo[] = [
+  {
+    id: "facebook_page",
+    label: "Facebook Page",
+    description: "Publish posts, videos and reels to a Page you manage.",
+    scopes: [
+      "public_profile",
+      "pages_show_list",
+      "pages_read_engagement",
+      "pages_manage_posts",
+      "business_management",
+    ],
+    authorizeUrl: `https://www.facebook.com/${GRAPH_VERSION}/dialog/oauth`,
+  },
+  {
+    id: "instagram",
+    label: "Instagram Business",
+    description: "Publish feed posts and reels to a Business or Creator account.",
+    scopes: [
+      "public_profile",
+      "pages_show_list",
+      "pages_read_engagement",
+      "business_management",
+      "instagram_basic",
+      "instagram_content_publish",
+    ],
+    authorizeUrl: `https://www.facebook.com/${GRAPH_VERSION}/dialog/oauth`,
+  },
+  {
+    id: "threads",
+    label: "Threads",
+    description: "Publish text and media posts to your Threads profile.",
+    scopes: ["threads_basic", "threads_content_publish"],
+    authorizeUrl: "https://threads.net/oauth/authorize",
+  },
+  {
+    id: "youtube",
+    label: "YouTube",
+    description: "Upload videos and Shorts to your YouTube channel.",
+    scopes: [
+      "https://www.googleapis.com/auth/youtube.upload",
+      "https://www.googleapis.com/auth/youtube.readonly",
+      // Needed for post-upload title/description/tags/privacy edits.
+      "https://www.googleapis.com/auth/youtube.force-ssl",
+    ],
+    authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+  },
+];
+
+/** Providers handled by the Meta consent flow (everything else has its own). */
+export const META_PROVIDERS: SocialProvider[] = ["facebook_page", "instagram", "threads"];
+
+export function providerInfo(id: SocialProvider): ProviderInfo {
+  const found = PROVIDERS.find((p) => p.id === id);
+  if (!found) throw new Error(`Unknown provider: ${id}`);
+  return found;
+}
+
+export type SocialConnection = {
+  id: string;
+  provider: SocialProvider;
+  externalId: string;
+  displayName: string | null;
+  username: string | null;
+  avatarUrl: string | null;
+  status: string;
+  createdAt: string;
+};
+
+export type TriggerType = "schedule" | "manual" | "new_media";
+export type ActionType = "publish_post" | "publish_reel" | "crosspost";
+export type RepeatRule = "once" | "daily" | "weekly" | "custom";
+
+export const TRIGGER_LABELS: Record<TriggerType, string> = {
+  schedule: "Scheduled",
+  manual: "Manual run",
+  new_media: "New media",
+};
+
+export const ACTION_LABELS: Record<ActionType, string> = {
+  publish_post: "Post",
+  publish_reel: "Reel / video",
+  crosspost: "Cross-post",
+};
+
+export const REPEAT_LABELS: Record<RepeatRule, string> = {
+  once: "Once",
+  daily: "Everyday",
+  weekly: "Weekly",
+  custom: "Custom",
+};
+
+/** Video creation settings a workflow uses when it generates its own clip. */
+export type CreationConfig = {
+  instructions: string;
+  category: string;
+  artStyle: string;
+  imageStyle: string;
+  aspectRatio: string;
+  durationSeconds: number;
+  voiceGender: string;
+  voicePersona: string;
+  voiceTone: string;
+  captions: boolean;
+  captionStyle: string;
+  captionScale: number;
+  quality: string;
+};
+
+export const CREATION_CATEGORIES = [
+  "Cosmic Universe",
+  "Nature Beauty",
+  "Ocean & Sky",
+  "Micro World",
+] as const;
+export const VOICE_GENDERS = ["Male", "Female"] as const;
+export const VOICE_PERSONAS = [
+  "Cosmic Documentary",
+  "Calm Nature Guide",
+  "Deep Storyteller",
+  "Awe & Wonder",
+] as const;
+export const VOICE_TONES = ["Neutral", "Calm", "Dramatic", "Excited", "Serious"] as const;
+export const CAPTION_TEMPLATES = [
+  "Neon Glow",
+  "Yellow Pop-Up",
+  "Minimalist White",
+  "Monospace Subtitles",
+] as const;
+export const CREATION_RATIOS = ["9:16", "16:9"] as const;
+export const CREATION_QUALITIES = ["720p", "1080p"] as const;
+export const CREATION_DURATIONS = [15, 20, 30, 45, 60] as const;
+
+export function defaultCreationConfig(): CreationConfig {
+  return {
+    instructions: "",
+    category: "Cosmic Universe",
+    artStyle: ART_STYLES[0],
+    imageStyle: IMAGE_STYLES[0],
+    aspectRatio: "9:16",
+    durationSeconds: 20,
+    voiceGender: "Male",
+    voicePersona: "Cosmic Documentary",
+    voiceTone: "Neutral",
+    captions: true,
+    captionStyle: "Neon Glow",
+    captionScale: 4,
+    quality: "1080p",
+  };
+}
+
+/** Actions whose media is generated by the Video Agent instead of linked. */
+export function isVideoAction(action: ActionType) {
+  return action === "publish_post" || action === "publish_reel" || action === "crosspost";
+}
+
+export type Workflow = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  triggerType: TriggerType;
+  scheduledAt: string | null;
+  repeatRule: RepeatRule;
+  timeSlots: string[];
+  actionType: ActionType;
+  caption: string | null;
+  hookTitle: string | null;
+  hashtags: string[];
+  mediaUrl: string | null;
+  mediaPath: string | null;
+  targets: string[];
+  lastRunAt: string | null;
+  lastRunStatus: string | null;
+  creationConfig: CreationConfig;
+  tzOffset: number;
+  nextDueAt: string | null;
+  runState: string;
+};
