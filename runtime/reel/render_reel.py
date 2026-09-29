@@ -694,12 +694,16 @@ def _score(c, terms, cfg):
     return (round(rel, 2), quality, comp, c["kind"] == "video")
 
 
-def _download(c, dest):
+def _download(c, dest, cap_mb=250):
     with requests.get(c["url"], stream=True, timeout=120) as r:
         r.raise_for_status()
+        n = 0
         with open(dest, "wb") as f:
             for chunk in r.iter_content(1 << 20):
                 f.write(chunk)
+                n += len(chunk)
+                if n > cap_mb << 20:
+                    raise RuntimeError(f"file larger than {cap_mb} MB")
 
 
 def _try_provider(name, q, cfg, idx, photos, neg):
@@ -1006,7 +1010,10 @@ def find_footage(req, cfg, used_hashes, exclude=(), want=1, budget=18):
             path = _cand_file(c)
             if path is None:
                 return c, None, [], "unusable file"
-            imgs, hs = analyzer.frames(path, c["kind"], n=4)
+            d = c.get("dur") or 0
+            # long clips (NASA films run minutes): judge exactly the 10 s window the edit will use, not the whole film
+            c["win"] = (0.0, d) if c["kind"] != "video" or d <= 15 else (round(d * 0.35, 2), round(d * 0.35 + 10, 2))
+            imgs, hs = analyzer.frames(path, c["kind"], n=4, start=c["win"][0], end=c["win"][1] if d else None)
             sim = max([visuals.similarity(h, u) for h in hs for u in used_hashes] or [0.0])
             if sim >= 0.88:
                 return c, None, hs, f"duplicate of a used shot (sim {sim:.2f})"
@@ -1048,7 +1055,7 @@ def find_footage(req, cfg, used_hashes, exclude=(), want=1, budget=18):
                     "query": c["query"], "score": c["_v"]["overall"], "scores": c["_v"]["scores"],
                     "seen": c["_v"]["seen"], "reason": c["_v"]["reason"], "label": c["label_rel"],
                     "sim": c["_sim"], "hash": (c["_hs"] or [None])[0], "hashes": c["_hs"], "dur": c.get("dur", 0),
-                    "verified": True, "weak": False})
+                    "win": c.get("win"), "verified": True, "weak": False})
     if not out and analyzer.STATE["down"]:
         # Analyzer outage: never pretend. Take the best label-anchored clip, clearly marked UNVERIFIED (fails acceptance).
         unv = [c for t, c in accepted if t == "u" and _CAND_FILE.get(c["id"])
@@ -1406,15 +1413,16 @@ class Planner:
             self.plans[i] = p
             return p
         # Split the narration across the accepted clips; a long clip may give a second, visually different moment.
-        pieces = [{"asset": c, "ss": 0.3} for c in clips]
+        pieces = [{"asset": c, "ss": round((c.get("win") or (0, 0))[0] + 0.3, 2)} for c in clips]
         need = max(len(pieces), min(segs_n, math.ceil(sc["dur"] / MAX_HOLD)))
         for c in sorted(clips, key=lambda c: -(c.get("dur") or 0)):
             if len(pieces) >= need:
                 break
             hs = c.get("hashes") or []
-            if c["kind"] == "video" and (c.get("dur") or 0) >= 2 * sc["dur"] / need + 1 and len(hs) >= 4 \
+            w0, w1 = c.get("win") or (0, c.get("dur") or 0)
+            if c["kind"] == "video" and (w1 - w0) >= 2 * sc["dur"] / need + 1 and len(hs) >= 4 \
                     and visuals.similarity(hs[0], hs[-1]) < 0.85:
-                pieces.append({"asset": c, "ss": round(c["dur"] * 0.6, 2), "second_moment": True})
+                pieces.append({"asset": c, "ss": round(w0 + (w1 - w0) * 0.6, 2), "second_moment": True})
         pieces = pieces[:max(1, need)]
         cuts = [round(nframes * k / len(pieces)) for k in range(len(pieces) + 1)]
         segments = [{**pc, "frames": cuts[j + 1] - cuts[j]} for j, pc in enumerate(pieces)]
