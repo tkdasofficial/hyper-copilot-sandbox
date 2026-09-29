@@ -141,15 +141,15 @@ NIM_MODELS = ["nvidia/nemotron-3-ultra-550b-a55b", "deepseek-ai/deepseek-v4.1-fl
 
 
 LANG_RULES = {
-    "english": "LANGUAGE: Pure, natural spoken English only. No Hindi words at all. Fact label: \"Fact number 1\".",
-    "hindi": "LANGUAGE: Pure, natural spoken Hindi only, in Devanagari script. Do not mix English words; use natural Hindi equivalents (numbers in Hindi words or digits). Fact label: \"फैक्ट नंबर 1\" is not allowed; use \"तथ्य नंबर 1\" or \"नंबर 1\". Hook phrase: \"क्या आपको पता है?\".",
+    "english": "LANGUAGE: Pure, natural spoken English only. No Hindi words at all.",
+    "hindi": "LANGUAGE: Pure, natural spoken Hindi only, in Devanagari script. Do not mix English words; use natural Hindi equivalents (numbers in Hindi words or digits). Hook phrase: \"क्या आपको पता है?\".",
     "hinglish": ("LANGUAGE: Hinglish — the natural conversational Hindi + English mix Indian creators actually speak. "
                  "Write Hindi words in Devanagari and English words in Latin script, e.g. "
                  "\"क्या आपको पता है कि human body में एक ऐसा organ है जो खुद को regenerate कर सकता है?\". "
                  "Keep common modern/technical words in English (organ, planet, rocket, engine, brain, speed, record, scientists, data) "
                  "where that is how people naturally say them; keep grammar, connectors and emotion in Hindi. "
                  "Do not force English into every sentence and never translate common technical terms into awkward formal Hindi. "
-                 "It must read fluent, not machine-translated. Fact label: \"Fact number 1\". Hook: \"क्या आपको पता है?\" or \"Did you know?\"."),
+                 "It must read fluent, not machine-translated. Hook: \"क्या आपको पता है?\" or \"Did you know?\" only if natural."),
     "bengali": "LANGUAGE: Natural spoken Bengali only, in Bengali script.",
 }
 
@@ -192,12 +192,14 @@ DIRECTION:
 - Sound energetic, conversational and original, like a good Indian fact-video presenter. Use short, punchy sentences with minimal pauses, and natural punctuation for vocal emphasis on striking words.
 - Use "Did you know?" / "क्या आपको पता है?" only when it sounds natural; do not force or repeat it.
 - Every line must move the story forward. Sound like a real creator talking to a friend, never like an AI article.
-- For Top N/list requests, exactly N distinct facts, each introduced with the fact label defined in LANGUAGE. A very short first hook is allowed; no separate outro scene.
+- For Top N/list requests, exactly N distinct facts, each introduced with a natural spoken transition ("और सुनिए...", "But here is the crazy part", "अब सबसे बड़ा सरप्राइज़") - NEVER numbered labels such as "Fact number 1", "नंबर 2", "तथ्य नंबर 3", "पहला fact". A very short first hook is allowed; no separate outro scene.
 - For one focused topic, explain that topic with connected scenes and a strong final payoff, not a numbered list.
 - Never invent numbers, quotations, or unsupported superlatives.
 - Keep the exact reference of every comparison from the research ("2.5 times more energy than it RECEIVES from the Sun", not "than the Sun"; "less dense than water", not "lighter than water"). Dropping the reference changes the fact.
 - Keep each scene 1-2 short sentences (about 3-6 seconds spoken).
-- Each scene must have a SPECIFIC visual subject matching exactly what is spoken. Provide 3 concrete English stock-search phrases, most relevant first.
+- VISUAL FEASIBILITY: footage comes ONLY from real libraries (NASA Image & Video Library, Pexels, Pixabay) - no AI images. Write every line so real footage can show it (Saturn's rings, Cassini imagery, a spacecraft, a telescope, Earth vs Saturn scale). If a fact cannot be shown, pick a showable angle of it or use an allowed infographic.
+- Each scene has a "visual" plan: objective (what the viewer must SEE), subject (the exact object that must be visible), action (motion/context), shot_type, must_not (things that must NOT appear, e.g. "Saturn V rocket", "other planets", "people", "text slides").
+- Provide 5 concrete English footage-search queries per scene, most specific first, phrased the way NASA/stock libraries title footage ("Cassini Saturn rings flyby", "Saturn planet rotating animation", "Hubble Saturn aurora").
 - VOICE-READY TEXT (read aloud by ElevenLabs TTS, so write exactly what is spoken):
   * Write EVERY number as spoken words in the narration language (English "three hundred eighty-four thousand kilometres"; Hindi/Hinglish "तीन लाख चौरासी हज़ार किलोमीटर"; Bengali in Bengali words). Never digits in narration.
   * Round big numbers naturally; at most one number per sentence, comma before a big number.
@@ -216,7 +218,8 @@ Return JSON:
   "visual_anchors": ["5-10 lowercase English words, at least one of which any on-topic stock footage label must contain (e.g. saturn, planet, rings, space, galaxy, telescope)"],
   "scenes": [{{"purpose": "hook|context|fact|reveal|payoff", "narration": "...", "claim": "the factual claim in English or empty",
               "sources": ["S1"], "badge": "short fact number or empty", "headline": "1-3 word label or empty",
-              "shot_type": "...", "keywords": ["specific English stock query naming the exact subject (e.g. 'Saturn rings Cassini')", "alternative real-footage query", "broader on-topic query"],
+              "shot_type": "...", "visual": {{"objective": "...", "subject": "...", "action": "...", "must_not": ["..."]}},
+              "keywords": ["most specific footage query (e.g. 'Cassini Saturn rings flyby')", "query 2", "query 3", "query 4", "broader on-subject query"],
               "infographic": null, "sfx": "", "music_intensity": "medium",
               "emphasis": ["1-3 key words/numbers from the narration to highlight"]}}]}}
 """
