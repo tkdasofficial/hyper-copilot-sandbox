@@ -531,18 +531,23 @@ def el_tts(text, cfg, out: Path, rate: str, ctx=None):
 def tts(text, cfg, out: Path, rate: str, ctx=None):
     """ElevenLabs first; Edge TTS only if ElevenLabs fails."""
     text = spoken_text(text, cfg)
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             w = el_tts(text, cfg, out, rate, ctx)
             print(f"[reel] voice: ElevenLabs ({el_voice(cfg)})")
+            VOICE_BY[out.name] = "elevenlabs"
             return w
         except Exception as e:
             print("[reel] ElevenLabs failed:", e)
             if EL_DISABLED["off"] or not os.environ.get("ELEVENLABS_API_KEY"):
                 break
-            time.sleep(2)
+            time.sleep(4 * (attempt + 1))
     print("[reel] voice: Edge TTS backup")
+    VOICE_BY[out.name] = "edge"
     return edge_tts_voice(text, cfg, out, rate)
+
+
+VOICE_BY: dict = {}
 
 
 def edge_tts_voice(text, cfg, out: Path, rate: str):
@@ -1358,7 +1363,8 @@ class Planner:
             if k == skip:
                 continue
             for seg in p.get("segments", []):
-                out += [h for h in (seg["asset"].get("hash"), seg["asset"].get("thumb_hash")) if h is not None]
+                a = seg.get("asset") or {}
+                out += [h for h in [a.get("hash"), a.get("thumb_hash"), *(a.get("hashes") or [])] if h is not None]
         return out
 
     def _nidx(self):
@@ -1466,6 +1472,10 @@ def hard_checks(timeline, planner, fps) -> list:
         issues.append("hook: opens with a label/greeting instead of a curiosity hook")
     if timeline and timeline[0]["dur"] > 5.5:
         issues.append(f"hook: first scene is {timeline[0]['dur']:.1f}s (should be under 5s)")
+    label_re = re.compile(r"(fact\s*(number|no\.?|#)\s*\w+|फैक्ट\s*नंबर|तथ्य\s*नंबर|^\s*नंबर\s*\S+|^\s*number\s+\w+|पहला\s+fact)", re.I)
+    labelled = [k + 1 for k, sc in enumerate(timeline) if label_re.search(str(sc.get("narration", "")))]
+    if labelled:
+        issues.append(f"script: numbered 'Fact number' style labels in scenes {labelled} (use natural transitions)")
     purposes = [str(sc.get("purpose", "")).lower() for sc in timeline]
     if purposes and purposes[0] != "hook":
         issues.append("story: first scene is not a hook")
@@ -1478,8 +1488,12 @@ def hard_checks(timeline, planner, fps) -> list:
         issues.append("infographics: two charts back to back")
     hashes = []
     for i in sorted(planner.plans):
+        if planner.plans[i]["type"] == "missing":
+            issues.append(f"visual: scene {i + 1} NO_SUITABLE_FOOTAGE_FOUND")
         for seg in planner.plans[i].get("segments", []):
             a = seg["asset"]
+            if a.get("verified") is False:
+                issues.append(f"visual: scene {i + 1} footage not verified by the analyzer")
             if a.get("weak"):
                 issues.append(f"visual: scene {i + 1} footage is only loosely related (relevance {a.get('score')})")
             h = a.get("hash")
@@ -1488,7 +1502,7 @@ def hard_checks(timeline, planner, fps) -> list:
                     issues.append(f"repetition: scene {i + 1} looks like scene {k + 1}")
                     break
             hashes.append((i, h))
-            if seg["frames"] / fps > planner.cut_len * 1.8 and planner.plans[i]["type"] == "footage":
+            if seg["frames"] / fps > MAX_HOLD + 0.3 and planner.plans[i]["type"] == "footage":
                 issues.append(f"pacing: scene {i + 1} holds one shot for {seg['frames'] / fps:.1f}s")
     return list(dict.fromkeys(issues))
 
@@ -1504,8 +1518,14 @@ def _voice_all(cfg, t, scenes, fps, vid):
         return a, director.restore_display(words, cfg)
 
     update_row(vid, step=f"Voiceover (ElevenLabs) for {len(scenes)} scenes", progress=20)
-    with ThreadPoolExecutor(max_workers=3) as ex:
+    with ThreadPoolExecutor(max_workers=2) as ex:  # = ElevenLabs concurrency on this plan
         results = list(ex.map(one, range(len(scenes))))
+    # Coverage pass: any line that fell back to Edge gets one more sequential ElevenLabs try (keeps one voice).
+    for i in range(len(scenes)):
+        if VOICE_BY.get(f"voice_{i:02d}.mp3") == "edge" and os.environ.get("ELEVENLABS_API_KEY") and not EL_DISABLED["off"]:
+            time.sleep(3)
+            print(f"[voice] scene {i + 1} was on Edge TTS; retrying ElevenLabs")
+            results[i] = one(i)
     timeline, audio_parts, cursor = [], [], 0.0
     for i, (sc, (a, words)) in enumerate(zip(scenes, results)):
         d = math.ceil((probe_duration(a) + float(t.get("scene_gap", 0.2))) * fps) / fps
@@ -1517,7 +1537,8 @@ def _voice_all(cfg, t, scenes, fps, vid):
                          "purpose": sc.get("purpose", ""), "shot_type": sc.get("shot_type", ""),
                          "infographic": sc.get("infographic") if isinstance(sc.get("infographic"), dict) else None,
                          "sfx": sc.get("sfx", ""), "music_intensity": sc.get("music_intensity", "medium"),
-                         "narration": sc["narration"]})
+                         "narration": sc["narration"], "visual": sc.get("visual") if isinstance(sc.get("visual"), dict) else {},
+                         "voice": VOICE_BY.get(f"voice_{i:02d}.mp3", "unknown")})
         cursor += d
     return timeline, audio_parts, cursor
 
