@@ -1198,7 +1198,8 @@ def render_scene(asset, t, i, dur, W, H, fps, name=None) -> Path:
     if asset["kind"] == "image":
         inp = ["-loop", "1", "-i", str(asset["path"])]
     else:
-        inp = ["-stream_loop", "-1", "-i", str(asset["path"])]
+        ss = float(asset.get("ss") or 0)
+        inp = ["-stream_loop", "-1", *(["-ss", f"{ss:.2f}"] if ss > 0 else []), "-i", str(asset["path"])]
     run(["ffmpeg", "-y", *inp, "-frames:v", str(max(1, round(dur * fps))), "-vf", vf, "-an", "-r", str(fps),
          "-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-threads", "2", "-pix_fmt", "yuv420p", str(out)])
     return out
@@ -1330,6 +1331,7 @@ def _fact_template(cfg, t):
 
 PROJECT = WORK / "project"
 INFO_MAX = 2
+MAX_HOLD = 3.4  # seconds one shot may stay on screen in a fact reel
 
 
 class Planner:
@@ -1364,86 +1366,60 @@ class Planner:
         return self.seq
 
     def plan(self, i, sc, override=None, exclude=()):
+        """Footage for one scene: only analyzer-ACCEPTED clips. Nothing acceptable -> NO_SUITABLE_FOOTAGE_FOUND
+        (or an allowed infographic), never a generic clip."""
         override = override or {}
         nframes = round(sc["dur"] * self.fps)
-        subject = str((override.get("queries") or sc["keywords"] or [self.cfg["prompt"]])[0])
-        claim = sc.get("claim") or ""
+        req = scene_req(self.cfg, sc, override)
+        subject, claim = req["required_subject"], sc.get("claim") or ""
         info = override.get("infographic")
         if info and self.info_ok(i):
             return self._info_plan(i, sc, info, subject, claim, nframes)
-        queries = [str(k) for k in (override.get("queries") or sc["keywords"]) if str(k).strip()][:4] or [self.cfg["prompt"]]
         segs_n = max(1, math.ceil(sc["dur"] / self.cut_len)) if self.t.get("fact_style") else 1
-        cuts = [round(nframes * k / segs_n) for k in range(segs_n + 1)]
         used = self.used_hashes(skip=i)
-        # never reuse a clip/photo already placed in another scene (hashes of photo vs. thumbnail can differ)
         exclude = tuple(exclude) + tuple(sg["asset"]["id"] for k, p in self.plans.items() if k != i
                                          for sg in p.get("segments", []) if sg.get("asset"))
-        strict = _is_fact(self.cfg)  # fact reels: stock only, and every shot must show the reel's subject world
-        segments = []
-        for j in range(segs_n):
-            ordered = queries[j % len(queries):] + queries[:j % len(queries)]
-            asset = select_asset(ordered, self.cfg, self._nidx(), subject, claim, used, sc["shot_type"] if j == 0 else "",
-                                 exclude=exclude, require_anchor=strict)
-            if asset is None and j == 0:
-                asset = select_asset([f"{self.cfg['topic']} {queries[0]}", self.cfg["topic"]], self.cfg, self._nidx(),
-                                     subject, claim, used, exclude=exclude, require_anchor=strict)
-            if asset is None:
-                if segments:  # extend the previous shot instead of repeating it
-                    segments[-1]["frames"] += cuts[j + 1] - cuts[j]
-                    continue
-                if sc.get("infographic") and self.info_ok(i):
-                    return self._info_plan(i, sc, sc["infographic"], subject, claim, nframes)
-                # Last resort before failing the reel: broad on-topic footage (still anchored, still de-duplicated).
-                broad = [f"{self.cfg['topic']} {a}" for a in sorted(ANCHORS)[:3]] + [self.cfg["topic"]]
-                asset = select_asset(broad, self.cfg, self._nidx(), self.cfg["topic"], claim, used, min_score=0.45,
-                                     exclude=exclude, require_anchor=strict)
-                if asset is None and strict:  # nothing on-subject left: loosely related stock, flagged weak in QA
-                    asset = select_asset(broad, self.cfg, self._nidx(), self.cfg["topic"], claim, used, min_score=0.45,
-                                         exclude=exclude)
-                if asset is None:  # stock has nothing on-subject left: generate an exact still for this line
-                    asset = ai_still(f"{subject}. {claim}".strip(), self.cfg, self._nidx(), GRADE.get("vf"))
-                if asset is None:
-                    # Stock is exhausted for this subject: re-use the best on-subject shot from a non-adjacent scene
-                    # rather than killing the whole reel. It stays flagged (reused + weak) so QA reports it honestly.
-                    pool = [sg["asset"] for k, p in self.plans.items() if abs(k - i) > 1
-                            for sg in p.get("segments", []) if sg.get("asset") and sg["asset"].get("src") != "info"]
-                    pool.sort(key=lambda a: (not a.get("weak"), a.get("score") or 0), reverse=True)
-                    if pool:
-                        asset = dict(pool[0], reused=True, weak=True)
-                        print(f"[visual] scene {i + 1}: stock exhausted, re-using {asset['id']} from another scene")
-                if asset is None:
-                    raise RuntimeError(f"no usable footage for scene {i + 1} ('{subject}')")
-                asset.setdefault("weak", asset.get("src") != "ai")
-            if strict and asset is not None and asset.get("weak") and (asset.get("score") is None or asset["score"] < 0.4):
-                # Vision says the literal-query clip is off-subject (ice sheet for "Saturn ice"): take a verified
-                # shot of the subject itself from a broad subject pool instead; keep the weak clip only if none.
-                topic = self.cfg["topic"]
-                pool = [f"{topic} planet", f"{topic} rings", f"{topic} space", "planet with rings in space",
-                        "gas giant planet", "solar system planets", "planet orbit space"]
-                alt = select_asset(pool, self.cfg, self._nidx(), f"{topic} planet", claim, used, min_score=0.5,
-                                   exclude=exclude + (asset["id"],), require_anchor=True)
-                if alt is not None and not alt.get("weak"):
-                    USED.discard(asset["id"])
-                    asset = alt
-            if asset is not None and asset.get("weak") and (asset.get("score") is None or asset["score"] < 0.4):
-                # Stock only had an unrelated shot (vision: "wind turbine" for Saturn's winds). An exact generated
-                # still of the subject beats a misleading clip; keep the stock clip only if generation fails.
-                gen = ai_still(f"{subject}. {claim}".strip(), self.cfg, self._nidx())
-                if gen is not None:
-                    USED.discard(asset["id"])
-                    asset = gen
-            if j == 0 and asset.get("weak") and sc.get("infographic") and self.info_ok(i):
-                USED.discard(asset["id"])
+        clips, log = find_footage(req, self.cfg, used, exclude, want=segs_n)
+        if len(clips) < min(segs_n, 2) and not analyzer.STATE["down"]:
+            # rejected -> new queries written from the analyzer's reasons -> other sources -> analyze again
+            newq = director.requery(req, log)
+            if newq:
+                more, log2 = find_footage({**req, "queries": newq}, self.cfg,
+                                          used + [h for c in clips for h in c.get("hashes") or [] if h is not None],
+                                          exclude + tuple(c["id"] for c in clips), want=segs_n - len(clips))
+                clips += more
+                log += log2
+        if not clips:
+            if sc.get("infographic") and self.info_ok(i):
                 return self._info_plan(i, sc, sc["infographic"], subject, claim, nframes)
-            used += [h for h in (asset.get("hash"), asset.get("thumb_hash")) if h is not None]
-            segments.append({"asset": asset, "frames": cuts[j + 1] - cuts[j]})
-        p = {"type": "footage", "segments": segments}
+            print(f"[visual] scene {i + 1}: NO_SUITABLE_FOOTAGE_FOUND ({len(log)} candidates analyzed)")
+            p = {"type": "missing", "status": "NO_SUITABLE_FOOTAGE_FOUND", "frames": nframes, "segments": [],
+                 "log": log[-15:], "req": req}
+            self.plans[i] = p
+            return p
+        # Split the narration across the accepted clips; a long clip may give a second, visually different moment.
+        pieces = [{"asset": c, "ss": 0.3} for c in clips]
+        need = max(len(pieces), min(segs_n, math.ceil(sc["dur"] / MAX_HOLD)))
+        for c in sorted(clips, key=lambda c: -(c.get("dur") or 0)):
+            if len(pieces) >= need:
+                break
+            hs = c.get("hashes") or []
+            if c["kind"] == "video" and (c.get("dur") or 0) >= 2 * sc["dur"] / need + 1 and len(hs) >= 4 \
+                    and visuals.similarity(hs[0], hs[-1]) < 0.85:
+                pieces.append({"asset": c, "ss": round(c["dur"] * 0.6, 2), "second_moment": True})
+        pieces = pieces[:max(1, need)]
+        cuts = [round(nframes * k / len(pieces)) for k in range(len(pieces) + 1)]
+        segments = [{**pc, "frames": cuts[j + 1] - cuts[j]} for j, pc in enumerate(pieces)]
+        p = {"type": "footage", "segments": segments, "log": log[-15:], "req": req}
         self.plans[i] = p
         return p
 
     def _info_plan(self, i, sc, info, subject, claim, nframes):
-        bg = select_asset(sc["keywords"][:2], self.cfg, self._nidx(), subject, claim, self.used_hashes(skip=i), min_score=0.5)
-        p = {"type": "infographic", "info": info, "frames": nframes, "segments": [{"asset": bg, "frames": nframes}] if bg else []}
+        req = scene_req(self.cfg, sc)
+        got, _ = find_footage(req, self.cfg, self.used_hashes(skip=i), want=1, budget=6)
+        bg = got[0] if got else None
+        p = {"type": "infographic", "info": info, "frames": nframes, "req": req,
+             "segments": [{"asset": bg, "frames": nframes}] if bg else []}
         self.plans[i] = p
         return p
 
@@ -1452,9 +1428,13 @@ class Planner:
         if p["type"] == "infographic":
             return [{"type": "infographic", "title": p["info"].get("title", ""),
                      "background": (p["segments"][0]["asset"].get("id") if p["segments"] else None)}]
+        if p["type"] == "missing":
+            return [{"type": "missing", "status": p["status"], "seconds": round(p["frames"] / self.fps, 2),
+                     "rejected": [f"{x['id']}: {x.get('reason', '')}" for x in p.get("log", [])][-6:]}]
         return [{"type": s["asset"]["kind"], "id": s["asset"].get("id"), "src": s["asset"].get("src"),
-                 "query": s["asset"].get("query"), "relevance": s["asset"].get("score"), "label": s["asset"].get("label"),
-                 "similarity": s["asset"].get("sim"), "weak": bool(s["asset"].get("weak")),
+                 "query": s["asset"].get("query"), "relevance": s["asset"].get("score"), "seen": s["asset"].get("seen"),
+                 "verified": bool(s["asset"].get("verified")), "similarity": s["asset"].get("sim"),
+                 "weak": bool(s["asset"].get("weak")), "in_point": s.get("ss", 0),
                  "seconds": round(s["frames"] / self.fps, 2)} for s in p["segments"]]
 
     def render(self, i):
@@ -1466,10 +1446,15 @@ class Planner:
             visuals.render_infographic(p["info"], p["frames"] / self.fps, self.W, self.H, self.fps, out, WORK,
                                        background=bg["path"] if bg else None, bg_kind=bg["kind"] if bg else "video")
             return [out]
+        if p["type"] == "missing":  # honest placeholder: QA fails it and the redo loop replaces it
+            out = WORK / f"missing_{i:02d}_{self._nidx()}.mp4"
+            run(["ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=0x0b0f1a:s={self.W}x{self.H}:r={self.fps}",
+                 "-frames:v", str(p["frames"]), "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", str(out)])
+            return [out]
         outs = []
         for s in p["segments"]:
-            outs.append(render_scene(s["asset"], self.t, self._nidx(), s["frames"] / self.fps, self.W, self.H, self.fps,
-                                     name=f"scene_{i:02d}_{len(outs)}_{self._nidx()}"))
+            outs.append(render_scene({**s["asset"], "ss": s.get("ss", 0)}, self.t, self._nidx(), s["frames"] / self.fps,
+                                     self.W, self.H, self.fps, name=f"scene_{i:02d}_{len(outs)}_{self._nidx()}"))
         return outs
 
 
