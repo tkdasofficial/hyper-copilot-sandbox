@@ -16,7 +16,7 @@ from pathlib import Path
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import director, visuals, sound, qa  # noqa: E402
+import director, visuals, sound, qa, analyzer  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
 WORK = Path(os.environ.get("WORK_DIR", "/tmp/reel_work"))
@@ -729,7 +729,8 @@ _SEARCH_CACHE: dict = {}
 def search_cached(prov, q, cfg, photos):
     key = (prov, q.lower(), photos)
     if key not in _SEARCH_CACHE:
-        _SEARCH_CACHE[key] = (search_pixabay if prov == "pixabay" else search_pexels)(q, cfg, photos)
+        fn = {"pixabay": search_pixabay, "nasa": analyzer.search_nasa}.get(prov, search_pexels)
+        _SEARCH_CACHE[key] = fn(q, cfg, photos)
     return _SEARCH_CACHE[key]
 
 
@@ -906,6 +907,152 @@ def select_asset(queries, cfg, idx, subject, claim, used_hashes, shot="", min_sc
         except Exception as e:
             print("[stock] download failed:", str(e)[:120])
     return None
+
+
+def scene_req(cfg, sc, override=None):
+    """Visual requirements the analyzer judges footage against (from the storyboard, never from stock labels)."""
+    v = sc.get("visual") if isinstance(sc.get("visual"), dict) else {}
+    must_not = [str(x) for x in (v.get("must_not") or []) if str(x).strip()]
+    tw = {w.lower() for w in re.findall(r"[A-Za-z]{4,}", str(cfg.get("topic", "")))}
+    for w in tw:
+        must_not += [f"{w} {b}" for b in HOMONYMS.get(w, [])[:4]]
+    qs = [str(k) for k in ((override or {}).get("queries") or sc.get("keywords") or []) if str(k).strip()]
+    return {"topic": cfg.get("topic"), "narration": sc.get("narration", ""), "claim": sc.get("claim", ""),
+            "visual_objective": v.get("objective") or (qs[0] if qs else ""), "required_subject": v.get("subject") or cfg.get("topic"),
+            "required_action": v.get("action", ""), "shot_type": sc.get("shot_type", ""), "must_not": must_not[:10],
+            "queries": qs[:6]}
+
+
+_VERDICT: dict = {}
+_CAND_FILE: dict = {}
+SPACEY = re.compile(r"saturn|jupiter|mars|venus|mercury|neptune|uranus|pluto|moon|planet|galaxy|nebula|star|sun|solar|"
+                    r"space|astronaut|rocket|nasa|comet|asteroid|black hole|universe|orbit|earth|telescope|cassini|hubble", re.I)
+
+
+def _cand_file(c):
+    """Download a candidate once (the analyzer must see the real file); returns path or None."""
+    if c["id"] in _CAND_FILE:
+        return _CAND_FILE[c["id"]]
+    path = None
+    try:
+        if c["src"] == "nasa" and not analyzer.resolve_nasa(c):
+            raise RuntimeError("no media file in NASA manifest")
+        ext = "jpg" if c["kind"] == "image" else "mp4"
+        dest = WORK / "cand" / f"{c['id']}.{ext}"
+        dest.parent.mkdir(exist_ok=True)
+        _download(c, dest)
+        ok = dest.stat().st_size > 20_000 and not unusable_asset(dest, c["kind"])
+        if ok and c["kind"] == "video":
+            info = run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+                        "-of", "csv=p=0", str(dest)]).strip().split(",")
+            wh = [int(x) for x in info if x.isdigit()]
+            ok = len(wh) == 2 and min(wh) >= 720
+            c["short"] = min(wh) if len(wh) == 2 else 0
+            c["dur"] = analyzer._duration(dest)
+            ok = ok and c["dur"] >= 1.5
+        path = dest if ok else None
+    except Exception as e:
+        print(f"[footage] {c['id']} download failed:", str(e)[:100])
+    _CAND_FILE[c["id"]] = path
+    return path
+
+
+def find_footage(req, cfg, used_hashes, exclude=(), want=1, budget=18):
+    """Multi-source search -> download -> frames -> Nemotron Omni verdict -> ranked ACCEPTED clips.
+    Titles/tags only order the candidates; they never accept one. Returns (accepted_assets, log)."""
+    photos_only = str(cfg["visual_type"]).lower().startswith("stock photo")
+    neg = _neg_terms(cfg)
+    topic_words = {w.lower() for w in re.findall(r"[A-Za-z]{4,}", str(cfg.get("topic", "")))}
+    order = [p for p in ("pexels", "pixabay") if p in str(cfg["sources"]).lower()] or ["pexels", "pixabay"]
+    if SPACEY.search(f"{cfg.get('topic', '')} {req.get('required_subject', '')}") or "nasa" in str(cfg["sources"]).lower():
+        order = ["nasa"] + order
+    qs, seen_q = [], set()
+    for q in req.get("queries") or [cfg["topic"]]:
+        q = re.sub(r"\b(infographic|chart|graph|diagram|comparison|visualization)\b", " ", str(q), flags=re.I)
+        q = re.sub(r"\s+", " ", q).strip()
+        if q and not topic_words & set(q.lower().split()) and SPACEY.search(str(cfg.get("topic", ""))):
+            q = f"{cfg['topic']} {q}"
+        if q and q.lower() not in seen_q:
+            seen_q.add(q.lower()); qs.append(q)
+    accepted, log, analyzed = [], [], 0
+    seen = set()
+    rkey = (req.get("narration") or "")[:80]
+    for bstart in range(0, len(qs), 2):
+        if analyzed >= budget or len(accepted) >= want:
+            break
+        pool = []
+        for q in qs[bstart:bstart + 2]:
+            for prov in order:
+                for photos in ([True] if photos_only else ([False, True] if bstart >= 2 else [False])):
+                    cands = search_cached(prov, q, cfg, photos)
+                    for c in cands:
+                        if c["id"] in seen or c["id"] in USED or c["id"] in exclude or any(n in c["label"] for n in neg) \
+                                or _homonym(c["label"], topic_words):
+                            continue
+                        seen.add(c["id"])
+                        pool.append({**c, "query": q, "label_rel": round(_relevance(c, _terms(q)), 2)})
+        # labels only ORDER the work (most promising first, NASA/videos first); the analyzer decides
+        pool.sort(key=lambda c: (c["label_rel"], c["src"] == "nasa", c["kind"] == "video"), reverse=True)
+        pool = pool[:max(0, min(6, budget - analyzed))]
+
+        def judge(c):
+            path = _cand_file(c)
+            if path is None:
+                return c, None, [], "unusable file"
+            imgs, hs = analyzer.frames(path, c["kind"], n=4)
+            sim = max([visuals.similarity(h, u) for h in hs for u in used_hashes] or [0.0])
+            if sim >= 0.88:
+                return c, None, hs, f"duplicate of a used shot (sim {sim:.2f})"
+            key = (c["id"], rkey)
+            if key not in _VERDICT:
+                _VERDICT[key] = analyzer.analyze_clip(imgs, req) if imgs else None
+            return c, _VERDICT[key], hs, round(sim, 2)
+
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            for c, v, hs, note in ex.map(judge, pool):
+                analyzed += 1
+                entry = {"id": c["id"], "src": c["src"], "query": c["query"]}
+                if v is None:
+                    entry.update(result="REJECT" if isinstance(note, str) else "UNVERIFIED",
+                                 reason=note if isinstance(note, str) else "analyzer unavailable")
+                    log.append(entry)
+                    if not isinstance(note, str):
+                        c["_unverified"] = (_CAND_FILE.get(c["id"]), hs, note)
+                        c["_hs"] = hs
+                        accepted.append(("u", c))
+                    continue
+                entry.update(result="ACCEPT" if v["accept"] else "REJECT", overall=v["overall"], seen=v["seen"],
+                             reason=v["reason"])
+                log.append(entry)
+                print(f"[analyzer] {c['id']} ({c['src']}) {entry['result']} {v['overall']} seen='{v['seen']}' "
+                      f"reason='{v['reason']}' q='{c['query']}'")
+                if v["accept"]:
+                    c["_v"], c["_hs"], c["_sim"] = v, hs, note
+                    accepted.append(("a", c))
+                    used_hashes = list(used_hashes) + [h for h in hs if h is not None]
+        if sum(1 for t, _ in accepted if t == "a") >= want:
+            break
+    good = [c for t, c in accepted if t == "a"]
+    good.sort(key=lambda c: c["_v"]["overall"], reverse=True)
+    out = []
+    for c in good[:want]:
+        USED.add(c["id"])
+        out.append({"path": _CAND_FILE[c["id"]], "kind": c["kind"], "src": c["src"], "id": c["id"], "url": c["url"],
+                    "query": c["query"], "score": c["_v"]["overall"], "scores": c["_v"]["scores"],
+                    "seen": c["_v"]["seen"], "reason": c["_v"]["reason"], "label": c["label_rel"],
+                    "sim": c["_sim"], "hash": (c["_hs"] or [None])[0], "hashes": c["_hs"], "dur": c.get("dur", 0),
+                    "verified": True, "weak": False})
+    if not out and analyzer.STATE["down"]:
+        # Analyzer outage: never pretend. Take the best label-anchored clip, clearly marked UNVERIFIED (fails acceptance).
+        unv = [c for t, c in accepted if t == "u" and _CAND_FILE.get(c["id"])
+               and (any(w in c["label"] for w in topic_words) or sum(a in c["label"] for a in ANCHORS) >= 2)]
+        for c in unv[:want]:
+            USED.add(c["id"])
+            out.append({"path": _CAND_FILE[c["id"]], "kind": c["kind"], "src": c["src"], "id": c["id"], "url": c["url"],
+                        "query": c["query"], "score": None, "label": c["label_rel"], "sim": 0.0,
+                        "hash": (c["_hs"] or [None])[0], "hashes": c["_hs"], "dur": c.get("dur", 0),
+                        "verified": False, "weak": True, "reason": "analyzer unavailable - unverified"})
+    return out, log
 
 
 def _refine(q):
