@@ -227,7 +227,7 @@ Return JSON:
 """
     key = os.environ.get("NVIDIA_API_KEY", "")
     last_err = None
-    for model in NIM_MODELS:
+    for model in NIM_MODELS + NIM_MODELS:  # second lap: provider overloads are usually over within minutes
         for attempt in range(2):  # a stalled model moves on quickly instead of burning 15 minutes
             try:
                 # Streamed: a long script arrives token by token, so a slow model never hits a whole-reply read timeout.
