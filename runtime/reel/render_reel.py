@@ -195,6 +195,7 @@ DIRECTION:
 - For Top N/list requests, exactly N distinct facts, each introduced with the fact label defined in LANGUAGE. A very short first hook is allowed; no separate outro scene.
 - For one focused topic, explain that topic with connected scenes and a strong final payoff, not a numbered list.
 - Never invent numbers, quotations, or unsupported superlatives.
+- Keep the exact reference of every comparison from the research ("2.5 times more energy than it RECEIVES from the Sun", not "than the Sun"; "less dense than water", not "lighter than water"). Dropping the reference changes the fact.
 - Keep each scene 1-2 short sentences (about 3-6 seconds spoken).
 - Each scene must have a SPECIFIC visual subject matching exactly what is spoken. Provide 3 concrete English stock-search phrases, most relevant first.
 - VOICE-READY TEXT (read aloud by ElevenLabs TTS, so write exactly what is spoken):
@@ -733,37 +734,58 @@ _VSCORE: dict = {}
 
 ANCHORS: set = set()
 
+# Stock labels that share a name with a sky object but show something else (Saturn V rocket, Mercury thermometer).
+HOMONYMS = {
+    "saturn": ["rocket", "apollo", "launch", "sega", "car", "engine", "gas", "station", "museum", "award", "vehicle", "store", "shop", "mall", "electronics", "retail"],
+    "mercury": ["thermometer", "freddie", "car", "liquid metal", "element"],
+    "mars": ["chocolate", "bar", "bruno", "candy"],
+    "jupiter": ["florida", "beach", "resort"],
+    "titan": ["crane", "truck", "watch"],
+    "venus": ["statue", "razor", "goddess", "painting"],
+    "pluto": ["disney", "dog", "cartoon"],
+}
+
+
+def _homonym(label, topic_words):
+    lab = label.lower()
+    return any(w in HOMONYMS and any(b in lab for b in HOMONYMS[w]) for w in topic_words)
+
 
 def ai_still(prompt, cfg, idx, _grade=None):
-    """Cloudflare Workers AI (FLUX schnell) still for scenes stock libraries cannot cover (e.g. Saturn's hexagon).
-    Returns an image asset (animated later with the usual Ken-Burns move) or None."""
-    acc, tok = os.environ.get("CLOUDFLARE_ACCOUNT_ID", ""), os.environ.get("CLOUDFLARE_API_TOKEN", "")
-    if not acc or not tok:
+    """Pixazo Flux 1 Schnell still for scenes stock libraries cannot cover. Never used for News & Facts reels,
+    which must stay on real stock media. Returns an image asset (animated with the usual Ken-Burns move) or None."""
+    if re.search(r"news|fact", str(cfg.get("category", "")), re.I):
         return None
-    # numbers/claims in the prompt make FLUX paint garbled captions ("0.69 g/cum3") - describe the subject only
+    key = os.environ.get("PIXAZO_API_KEY", "")
+    if not key:
+        return None
+    base = (os.environ.get("PIXAZO_BASE_URL") or "https://gateway.pixazo.ai").rstrip("/")
     prompt = re.sub(r"[\d.,%/°]+\s*\w{0,4}", " ", re.sub(r"\([^)]*\)", " ", prompt))
     prompt = re.sub(r"\s+", " ", prompt).strip()[:300]
     full = (f"{prompt}. Photorealistic cinematic documentary frame, {cfg.get('style', 'cinematic')} style, "
-            "accurate science visualization, vertical composition, absolutely no text, no letters, no numbers, no labels, "
-            "no diagram annotations, no watermark, no people unless mentioned")
+            "vertical composition, absolutely no text, no letters, no numbers, no labels, no watermark")
     for attempt in range(2):
         try:
-            r = requests.post(f"https://api.cloudflare.com/client/v4/accounts/{acc}/ai/run/@cf/black-forest-labs/flux-1-schnell",
-                              headers={"Authorization": f"Bearer {tok}"}, json={"prompt": full[:2000], "steps": 8}, timeout=90)
+            r = requests.post(f"{base}/flux-1-schnell/v1/getData",
+                              headers={"Ocp-Apim-Subscription-Key": key, "Content-Type": "application/json",
+                                       "Cache-Control": "no-cache"},
+                              json={"prompt": full[:2000], "num_steps": 8, "width": 768, "height": 1344}, timeout=120)
             r.raise_for_status()
-            img = base64.b64decode(r.json()["result"]["image"])
+            j = r.json()
+            url = j.get("output") or j.get("imageUrl")
+            img = requests.get(url, timeout=60).content if url else b""
             dest = WORK / f"asset_{idx}_ai.jpg"
             dest.write_bytes(img)
             if len(img) > 20_000 and not unusable_asset(dest, "image"):
-                print(f"[visual] AI still for '{prompt[:70]}'")
-                return {"path": dest, "kind": "image", "src": "ai", "id": f"ai{idx}", "url": "", "query": prompt[:120],
+                print(f"[visual] Pixazo still for '{prompt[:70]}'")
+                return {"path": dest, "kind": "image", "src": "ai", "id": f"ai{idx}", "url": url, "query": prompt[:120],
                         "score": None, "label": 1.0, "sim": 0.0, "hash": visuals.dhash(dest, "image"), "weak": False}
         except Exception as e:
-            print(f"[visual] AI still failed (attempt {attempt + 1}):", str(e)[:150])
+            print(f"[visual] Pixazo still failed (attempt {attempt + 1}):", str(e)[:150])
     return None
 
 
-def select_asset(queries, cfg, idx, subject, claim, used_hashes, shot="", min_score=0.6, exclude=()):
+def select_asset(queries, cfg, idx, subject, claim, used_hashes, shot="", min_score=0.6, exclude=(), require_anchor=False):
     """Semantic stock selection: search -> label pre-filter -> vision score + repetition check on previews
     (parallel, before any download) -> download the best -> quality probe. Returns asset dict or None.
     The returned asset carries weak=True when nothing met the relevance bar (reported, never hidden)."""
@@ -794,7 +816,8 @@ def select_asset(queries, cfg, idx, subject, claim, used_hashes, shot="", min_sc
             for photos in ([True] if photos_only else [False, True] if batch_start >= 2 else [False]):
                 for prov in order:
                     for c in search_cached(prov, q, cfg, photos):
-                        if c["id"] in seen or c["id"] in USED or c["id"] in exclude or any(n in c["label"] for n in neg):
+                        if c["id"] in seen or c["id"] in USED or c["id"] in exclude or any(n in c["label"] for n in neg) \
+                                or _homonym(c["label"], topic_words):
                             continue
                         seen.add(c["id"])
                         lab = _relevance(c, terms)
@@ -813,7 +836,7 @@ def select_asset(queries, cfg, idx, subject, claim, used_hashes, shot="", min_sc
                 _VSCORE[c["id"]] = director.vision_score(b64, subject, claim) if b64 else None
             return c, _VSCORE[c["id"]], h
 
-        with ThreadPoolExecutor(max_workers=4) as ex:
+        with ThreadPoolExecutor(max_workers=3) as ex:  # thumbnails in parallel; vision calls serialize themselves
             for c, v, h in ex.map(judge, fresh):
                 sim = max([visuals.similarity(h, u) for u in used_hashes] or [0.0])
                 base = v if v is not None else c["label_rel"] * 0.8
@@ -824,6 +847,7 @@ def select_asset(queries, cfg, idx, subject, claim, used_hashes, shot="", min_sc
                             or sum(a in lab_l for a in ANCHORS) >= 2)
                 # Without a vision verdict a label match alone is not enough: the stock label must name the
                 # reel's subject world (e.g. saturn/planet/space), otherwise "year" matches a party photo.
+                c["anchored"] = anchored
                 c["ok"] = sim < 0.88 and ((v >= min_score) if v is not None else (c["label_rel"] >= 0.5 and anchored))
                 if v is None and not anchored:
                     c["final"] = round(c["final"] * 0.3, 3)  # unverifiable + off-subject label: last-resort only
@@ -836,7 +860,9 @@ def select_asset(queries, cfg, idx, subject, claim, used_hashes, shot="", min_sc
               ", ".join(f"{c['id']} v={c['vision']} sim={c['sim']}" for c in sorted(scored, key=lambda c: -c['final'])[:3]) + ")")
     # A weak (loosely related) fallback is allowed and reported; a repeat of an existing shot never is.
     scored = [c for c in scored if c["sim"] < 0.88]
-    scored.sort(key=lambda c: (c["ok"], c["final"]), reverse=True)
+    if require_anchor:  # fact reels: an off-subject clip (windmill for "winds") is worse than a broader on-subject one
+        scored = [c for c in scored if c.get("anchored") or (c.get("vision") or 0) >= min_score]
+    scored.sort(key=lambda c: (c["ok"], c.get("anchored", False), c["final"]), reverse=True)
     for c in scored[:5]:
         ext = "jpg" if c["kind"] == "image" else "mp4"
         dest = WORK / f"asset_{idx}_{c['id']}.{ext}"
@@ -1178,14 +1204,15 @@ class Planner:
         # never reuse a clip/photo already placed in another scene (hashes of photo vs. thumbnail can differ)
         exclude = tuple(exclude) + tuple(sg["asset"]["id"] for k, p in self.plans.items() if k != i
                                          for sg in p.get("segments", []) if sg.get("asset"))
+        strict = _is_fact(self.cfg)  # fact reels: stock only, and every shot must show the reel's subject world
         segments = []
         for j in range(segs_n):
             ordered = queries[j % len(queries):] + queries[:j % len(queries)]
             asset = select_asset(ordered, self.cfg, self._nidx(), subject, claim, used, sc["shot_type"] if j == 0 else "",
-                                 exclude=exclude)
+                                 exclude=exclude, require_anchor=strict)
             if asset is None and j == 0:
                 asset = select_asset([f"{self.cfg['topic']} {queries[0]}", self.cfg["topic"]], self.cfg, self._nidx(),
-                                     subject, claim, used, exclude=exclude)
+                                     subject, claim, used, exclude=exclude, require_anchor=strict)
             if asset is None:
                 if segments:  # extend the previous shot instead of repeating it
                     segments[-1]["frames"] += cuts[j + 1] - cuts[j]
@@ -1195,12 +1222,26 @@ class Planner:
                 # Last resort before failing the reel: broad on-topic footage (still anchored, still de-duplicated).
                 broad = [f"{self.cfg['topic']} {a}" for a in sorted(ANCHORS)[:3]] + [self.cfg["topic"]]
                 asset = select_asset(broad, self.cfg, self._nidx(), self.cfg["topic"], claim, used, min_score=0.45,
-                                     exclude=exclude)
+                                     exclude=exclude, require_anchor=strict)
+                if asset is None and strict:  # nothing on-subject left: loosely related stock, flagged weak in QA
+                    asset = select_asset(broad, self.cfg, self._nidx(), self.cfg["topic"], claim, used, min_score=0.45,
+                                         exclude=exclude)
                 if asset is None:  # stock has nothing on-subject left: generate an exact still for this line
                     asset = ai_still(f"{subject}. {claim}".strip(), self.cfg, self._nidx(), GRADE.get("vf"))
                 if asset is None:
                     raise RuntimeError(f"no usable footage for scene {i + 1} ('{subject}')")
                 asset.setdefault("weak", asset.get("src") != "ai")
+            if strict and asset is not None and asset.get("weak") and (asset.get("score") is None or asset["score"] < 0.4):
+                # Vision says the literal-query clip is off-subject (ice sheet for "Saturn ice"): take a verified
+                # shot of the subject itself from a broad subject pool instead; keep the weak clip only if none.
+                topic = self.cfg["topic"]
+                pool = [f"{topic} planet", f"{topic} rings", f"{topic} space", "planet with rings in space",
+                        "gas giant planet", "solar system planets", "planet orbit space"]
+                alt = select_asset(pool, self.cfg, self._nidx(), f"{topic} planet", claim, used, min_score=0.5,
+                                   exclude=exclude + (asset["id"],), require_anchor=True)
+                if alt is not None and not alt.get("weak"):
+                    USED.discard(asset["id"])
+                    asset = alt
             if asset is not None and asset.get("weak") and (asset.get("score") is None or asset["score"] < 0.4):
                 # Stock only had an unrelated shot (vision: "wind turbine" for Saturn's winds). An exact generated
                 # still of the subject beats a misleading clip; keep the stock clip only if generation fails.
