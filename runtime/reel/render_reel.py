@@ -931,7 +931,7 @@ def scene_req(cfg, sc, override=None):
     return {"topic": cfg.get("topic"), "narration": sc.get("narration", ""), "claim": sc.get("claim", ""),
             "visual_objective": v.get("objective") or (qs[0] if qs else ""), "required_subject": v.get("subject") or cfg.get("topic"),
             "required_action": v.get("action", ""), "shot_type": sc.get("shot_type", ""), "must_not": must_not[:10],
-            "queries": qs[:6]}
+            "queries": qs[:6], "space": bool(SPACEY.search(f"{cfg.get('topic', '')} {v.get('subject') or ''}"))}
 
 
 _VERDICT: dict = {}
